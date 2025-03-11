@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm  # 导入 tqdm 库
-
+from NetworkParameterGenerator import ExternalParameterGenerator
 from DQN import DQN_agent
 from myenv import NetworkSwitchEnv
 from utils import evaluate_policy, str2bool
@@ -22,7 +22,7 @@ parser.add_argument('--Loadmodel', type=str2bool, default=False, help='Load pret
 parser.add_argument('--ModelIdex', type=int, default=100, help='which model to load')
 
 parser.add_argument('--seed', type=int, default=0, help='random seed')
-parser.add_argument('--Max_train_steps', type=int, default=int(1e2), help='Max training steps')
+parser.add_argument('--Max_train_steps', type=int, default=int(1e5), help='Max training steps')
 parser.add_argument('--save_interval', type=int, default=int(50e3), help='Model saving interval, in steps.')
 parser.add_argument('--eval_interval', type=int, default=int(2e3), help='Model evaluating interval, in steps.')
 parser.add_argument('--random_steps', type=int, default=int(3e3), help='steps for random policy to explore')
@@ -40,49 +40,8 @@ opt = parser.parse_args()
 opt.dvc = torch.device(opt.dvc)  # from str to torch.device
 print(opt)
 
-# 模拟参数生成函数
-def generate_sinr_sequence(num_steps, drop_prob=0.1, min_drop_duration=3, max_drop_duration=8):
-    sinr_sequence = []
-    is_dropped = False
-    drop_remaining = 0
-
-    for _ in range(num_steps):
-        if is_dropped:
-            sinr = 0
-            drop_remaining -= 1
-            if drop_remaining == 0:
-                is_dropped = False
-        else:
-            if np.random.rand() < drop_prob:
-                is_dropped = True
-                drop_remaining = np.random.randint(min_drop_duration, max_drop_duration + 1)
-                sinr = 0
-            else:
-                random_value = np.random.rand()
-                if random_value < 0.6:
-                    sinr = 0
-                elif random_value < 0.8:
-                    sinr = np.random.choice([0, 1])
-                else:
-                    sinr = 15 + np.random.normal(0, 1)
-
-        sinr_sequence.append(sinr)
-
-    return sinr_sequence
-
-# 修改 generate_external_params 函数
-def generate_external_params(sinr_sequence, step_index):
-    sinr = sinr_sequence[step_index]
-    snr = 14
-    speed = np.random.uniform(0, 100)
-    distance = np.random.uniform(0, 1000)
-    return {
-        "snr": snr,
-        "speed": speed,
-        "distance": distance,
-        "sinr": sinr
-    }
-
+# 初始化外部参数生成器
+param_generator = ExternalParameterGenerator()
 def main():
     EnvName = 'NetworkSwitchEnv'
     BriefEnvName = 'NSE'
@@ -114,12 +73,24 @@ def main():
           '  action_dim:', opt.action_dim, '  Random Seed:', opt.seed, '  max_e_steps:', opt.max_e_steps, '\n')
 
     if opt.write:
-        timenow = str(datetime.now())[0:-10]
-        timenow = ' ' + timenow[0:13] + '_' + timenow[-2::]
-        writepath = 'runs/{}-{}_S{}_'.format(algo_name, BriefEnvName[opt.EnvIdex], opt.seed) + timenow
+        # 生成精确到毫秒的时间戳
+        timenow = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]  # 移除最后三位微秒
+        # 构建路径（无空格，唯一标识）
+        writepath = f'runs/{algo_name}-{BriefEnvName[opt.EnvIdex]}_S{opt.seed}_{timenow}'
+
+        # 创建父目录（如果不存在）
+        os.makedirs('runs', exist_ok=True)
+
+        # 清理旧目录（可选）
         if os.path.exists(writepath):
-            shutil.rmtree(writepath)
+            try:
+                shutil.rmtree(writepath)
+            except PermissionError:
+                print(f"警告：无法删除目录 {writepath}，将继续执行...")
+
+        # 初始化 SummaryWriter
         writer = SummaryWriter(log_dir=writepath)
+        print(f"TensorBoard 日志将保存至：{writepath}")  # 可选：打印路径验证
 
     # 构建模型和回放缓冲区...
     if not os.path.exists('model'):
@@ -129,8 +100,7 @@ def main():
         agent.load(algo_name, BriefEnvName[opt.EnvIdex], opt.ModelIdex)
 
     total_steps = 0
-    # 生成 sinr 序列，长度为 Max_train_steps
-    sinr_sequence = generate_sinr_sequence(opt.Max_train_steps)
+
 
     # 使用 tqdm 为训练循环添加进度条
     with tqdm(total=opt.Max_train_steps, desc="Training Progress", unit="step") as pbar:
@@ -138,11 +108,13 @@ def main():
             s, info = env.reset(seed=env_seed)
             env_seed += 1
             done = False
+           # inner_loop_count=0
 
             while not done:
                 # 生成实时的外部参数
-                external_params = generate_external_params(sinr_sequence, total_steps)
-
+                external_params = param_generator.generate_external_params()
+                # 检查外部参数是否正确生成
+                print(f"Generated external params: {external_params}")
                 # 交互和训练逻辑...
                 if total_steps < opt.random_steps:
                     a = env.action_space.sample()
@@ -162,7 +134,7 @@ def main():
                     agent.exp_noise *= opt.noise_decay
 
                 if total_steps % opt.eval_interval == 0:
-                    score = evaluate_policy(eval_env, agent, turns=3)
+                    score = evaluate_policy(eval_env, agent, external_params,turns=3)
                     if opt.write:
                         writer.add_scalar('ep_r', score, global_step=total_steps)
                         writer.add_scalar('noise', agent.exp_noise, global_step=total_steps)
@@ -179,7 +151,12 @@ def main():
 
                 if total_steps % opt.save_interval == 0:
                     agent.save(algo_name, BriefEnvName[opt.EnvIdex], int(total_steps / 1000))
-
+                    """
+                inner_loop_count += 1  # 增加内层循环计数器
+                if inner_loop_count >= 50:  # 检查计数器是否达到 500
+                     done = True  # 终止内层循环
+                     print("内层循环达到 500 次，终止当前回合。")
+                    """
     if opt.write:
         writer.close()
     env.close()

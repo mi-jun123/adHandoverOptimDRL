@@ -41,7 +41,8 @@ class NetworkSwitchEnv(gym.Env):
         self.state = {}
         self.reset()
 
-
+        self.consecutive_low_sinr = 0  # 连续低 SINR 计数器
+        self.success_threshold = 2.5  # 成功奖励阈值
 
 
 
@@ -61,104 +62,133 @@ class NetworkSwitchEnv(gym.Env):
             - info (dict): 包含额外信息的字典，如状态参数的变化、当前状态值。
         """
 
-
-
     def step(self, action, external_params=None):
         old_state = self.state.copy()
-        print(f"Old state: {old_state}")
-        print(f"Action: {action}")
-        print(f"External params: {external_params}")
 
-        # 执行网络切换操作
-        if action == 0:  # 切换到自组网
+        # 处理外部参数
+        if external_params is None:
+            external_params = {
+                "snr": 14,
+                "speed": 0,
+                "distance": 0,
+                "sinr": 0
+            }
+
+        # 更新状态
+        for param, value in external_params.items():
+            if param in self.state_params:
+                self.state[param] = np.clip(value, self.state_lows[self.state_params.index(param)],
+                                            self.state_highs[self.state_params.index(param)])
+
+        # 执行动作
+        if action == 0:
             self.state["current_network"] = 0
-        elif action == 1:  # 切换到 5G
+        elif action == 1:
             self.state["current_network"] = 1
-        elif action == 2:  # 保持不变
-            pass
+        elif action == 2:
+            pass  # 保持不变
 
-        # 根据外接参数更新状态
-        if external_params is not None:
-            for param, value in external_params.items():
-                if param in self.state_params:
-                    self.state[param] = np.clip(value, self.state_lows[self.state_params.index(param)],
-                                                self.state_highs[self.state_params.index(param)])
-        print(f"New state: {self.state}")
-
-        # 奖励函数优化
+        # 计算奖励（优化逻辑）
         reward = 0
         current_network = self.state["current_network"]
         sinr = self.state["sinr"]
         snr = self.state["snr"]
 
-        # 当 5G 网络质量差（sinr 低）时鼓励切换到自组网
+        # 网络切换奖励
+        # 定义一个常量来表示切换的惩罚，可根据实际情况调整
+        SWITCH_PENALTY = 3
+
         if current_network == 1 and sinr <= 1:
             if action == 0:
-                reward += 10  # 成功切换到自组网给予正向奖励
+                # 当 5G 信号差时切换到自组网，给予奖励，但减去切换惩罚
+                reward += 10 - SWITCH_PENALTY
             else:
-                reward -= 5  # 未切换到自组网给予负向奖励
+                # 未切换到自组网给予负向奖励
+                reward -= 5
         elif current_network == 0:
-            reward += (snr - 20) * 0.1  # 自组网，使用 snr 计算基准奖励
-            reward += (snr - old_state.get("snr", 0)) * 0.5  # 自组网，使用 snr 计算变化奖励
+            # 自组网奖励：基于 SNR 稳定性
+            # 基准奖励
+            reward += (snr - 15) * 0.5
+            # 变化奖励
+            reward += (snr - old_state.get("snr", 0)) * 0.5
+
+            # 检查是否从 5G 切换到自组网
+            if old_state.get("current_network", 0) == 1 and action == 0:
+                # 如果是从 5G 切换到自组网，减去切换惩罚
+                reward -= SWITCH_PENALTY
+
+                # 对比自组网和 5G 的信号质量
+            old_sinr = old_state.get("sinr", 0)
+            if old_sinr > 1 and snr < old_sinr:
+                # 如果自组网信号质量比之前的 5G 略差，给予一定的负向奖励
+                reward -= 1
+
         elif current_network == 1 and sinr > 1:
-            reward += (sinr - 20) * 0.1  # 5G 网络正常，使用 sinr 计算基准奖励
-            reward += (sinr - old_state.get("sinr", 0)) * 0.5  # 5G 网络正常，使用 sinr 计算变化奖励
-        print(f"Reward: {reward}")
+            # 5G 奖励：基于 SINR 稳定性
+            # 基准奖励
+            reward += (sinr - 20) * 0.5
+            # 变化奖励
+            reward += (sinr - old_state.get("sinr", 0)) * 0.5
 
-        # 构建返回参数（根据最新 API 规范）
-        observation = np.array([self.state[param] for param in self.state_params], dtype=np.float32)
-        info = {
-            f"{param}_change": self.state[param] - old_state.get(param, 0) for param in self.state_params
-        }
-        info.update(self.state)
+            # 检查是否从自组网切换到 5G
+            if old_state.get("current_network", 0) == 0 and action == 1:
+                # 如果是从自组网切换到 5G，减去切换惩罚
+                reward -= SWITCH_PENALTY
+                # 惩罚频繁切换
+        if action != 2:
+            reward -= 3  # 每次切换扣 2 分
+        # 终止条件判断
+        terminated = False
+        truncated = False
+
+        # 失败条件：连续 3 步 5G SINR ≤ 1 且未切换到自组网
+        if self.state["current_network"] == 1 and self.state["sinr"] <= 1 and action != 0:
+            self.consecutive_low_sinr += 1
+            if self.consecutive_low_sinr >= 3:
+                terminated = True
+                reward -= 50  # 失败惩罚
+        else:
+            self.consecutive_low_sinr = 0  # 重置计数器
+
+        # 成功条件：单步奖励 ≥5
+        if reward >= self.success_threshold:
+            truncated = True
+            reward += 50  # 成功奖励
 
         return (
-            observation,
+            np.array([self.state[param] for param in self.state_params], dtype=np.float32),
             float(reward),
-            False,  # terminated
-            False,  # truncated
-            info
+            terminated,
+            truncated,
+            {"state": self.state}
         )
+
+
     def reset(self, seed=None, options=None):
-        """
-        重置环境状态。
-
-        参数:
-        seed (int, optional): 随机种子，用于固定随机数生成。
-        options (dict, optional): 额外的重置选项，这里未使用。
-
-        返回:
-        tuple: 包含以下元素的元组
-            - observation (np.ndarray): 重置后的观测状态，包含所有状态参数。
-            - info (dict): 包含额外信息的字典，如重置消息。
-        """
-        # 1. 调用父类的 reset 方法（可选，但推荐）
-        super().reset(seed=seed)
-
-        # 2. 固定随机种子（关键步骤）
+        # 固定随机种子
         if seed is not None:
-            np.random.seed(seed)  # 固定 numpy 的随机种子
-            # 如需固定其他库的种子（如 random），可添加：
-            # import random
-            # random.seed(seed)
+            np.random.seed(seed)
 
-        # 初始化状态变量
-        for i, param in enumerate(self.state_params):
-            if param == "current_network":
-                # 随机初始化当前网络
-                self.state[param] = np.random.randint(0, 2)
-            elif param == "snr":
-                self.state[param] = 14
-            elif param == "sinr":
-                self.state[param] = 15
-            else:
-                self.state[param] = np.random.uniform(self.state_lows[i], self.state_highs[i])
+        # 初始化状态（增强随机性）
+        self.state = {
+            "snr": np.random.uniform(10, 20),  # 随机初始化 SNR（10-20）
+            "speed": np.random.uniform(0, 100),
+            "distance": np.random.uniform(0, 1000),
+            "sinr": np.random.uniform(0, 100),  # 随机初始化 SINR
+            "current_network": np.random.randint(0, 1)  # 随机初始网络
+        }
+
+        # 限制参数范围
+        for param in self.state_params:
+            self.state[param] = np.clip(
+                self.state[param],
+                self.state_lows[self.state_params.index(param)],
+                self.state_highs[self.state_params.index(param)]
+            )
 
         observation = np.array([self.state[param] for param in self.state_params], dtype=np.float32)
-        return (
-            observation,
-            {"message": "Environment reset"}  # info
-        )
+        self.consecutive_low_sinr = 0  # 重置计数器
+        return observation, {"message": "Environment reset"}
 
     def render(self, mode="human"):
         """
