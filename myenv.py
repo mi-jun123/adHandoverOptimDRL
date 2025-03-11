@@ -140,7 +140,7 @@ class NetworkSwitchEnv(gym.Env):
         # 终止条件判断
         terminated = False
         truncated = False
-
+ 
         # 失败条件：连续 3 步 5G SINR ≤ 1 且未切换到自组网
         if self.state["current_network"] == 1 and self.state["sinr"] <= 1 and action != 0:
             self.consecutive_low_sinr += 1
