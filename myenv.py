@@ -42,7 +42,7 @@ class NetworkSwitchEnv(gym.Env):
         self.reset()
 
         self.consecutive_low_sinr = 0  # 连续低 SINR 计数器
-        self.success_threshold = 0  # 成功奖励阈值
+        self.success_threshold = 1 # 成功奖励阈值
 
 
 
@@ -89,14 +89,14 @@ class NetworkSwitchEnv(gym.Env):
             pass  # 保持不变
 
         # 计算奖励（优化逻辑）
-        reward = 0
+        reward = 5
         current_network = self.state["current_network"]
         sinr = self.state["sinr"]
         snr = self.state["snr"]
 
         # 网络切换奖励
         # 定义一个常量来表示切换的惩罚，可根据实际情况调整
-        SWITCH_PENALTY = 3
+        SWITCH_PENALTY = 0
 
         if current_network == 1 and sinr <= 1:
             if action == 0:
@@ -136,7 +136,7 @@ class NetworkSwitchEnv(gym.Env):
                 reward -= SWITCH_PENALTY
                 # 惩罚频繁切换
         if action != 2:
-            reward -= 3  # 每次切换扣 2 分
+            reward -= 2  # 每次切换扣 2 分
         # 终止条件判断
         terminated = False
         truncated = False
@@ -154,7 +154,7 @@ class NetworkSwitchEnv(gym.Env):
         if reward >= self.success_threshold:
             truncated = True
             reward += 50  # 成功奖励
-
+        print(f"reward ：{reward} ")
         return (
             np.array([self.state[param] for param in self.state_params], dtype=np.float32),
             float(reward),
