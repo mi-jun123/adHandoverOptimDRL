@@ -4,6 +4,38 @@ from gymnasium import spaces
 import time
 
 class NetworkSwitchEnv(gym.Env):
+
+    def calculate_path_loss(distance, frequency):
+        """
+        计算自由空间路径损耗
+        :param distance: 距离，单位：km
+        :param frequency: 信号频率，单位：MHz
+        :return: 路径损耗，单位：dB
+        """
+        return 20 * np.log10(self.distance) + 20 * np.log10(frequency) + 32.45
+
+
+
+    def calculate_abr(sinr, bandwidth, efficiency=0.8):
+        """
+        计算可用比特率（ABR）
+        :param sinr: 信号与干扰加噪声比（SINR）
+        :param bandwidth: 信道带宽，单位：Hz
+        :param efficiency: 效率因子，通常小于 1
+        :return: 可用比特率，单位：bps
+        """
+        return efficiency * bandwidth * np.log2(1 + sinr)
+
+    def calculate_abr(snr, bandwidth, efficiency=0.8):
+        """
+        计算可用比特率（ABR）
+        :param snr: 信噪比（SNR）
+        :param bandwidth: 信道带宽，单位：Hz
+        :param efficiency: 效率因子，通常小于 1
+        :return: 可用比特率，单位：bps
+        """
+        return efficiency * bandwidth * np.log2(1 + snr)
+
     def __init__(self, state_params_config=None):
         """
         初始化网络切换环境。
@@ -19,11 +51,20 @@ class NetworkSwitchEnv(gym.Env):
 
         # 处理状态空间配置
         if state_params_config is None:
+            # 定义默认的状态参数配置，区分自组网和 5G
             state_params_config = [
-                ("snr", 0.0, 100.0),  # 信噪比（SNR），取值范围从 0.0 到 100.0
-                ("speed", 0.0, 100.0),  # 速度，取值范围从 0.0 到 100.0
-                ("distance", 0.0, 1000.0),  # 距离，取值范围从 0.0 到 1000.0
-                ("sinr", 0.0, 100.0),  # 信干噪比（SINR），取值范围从 0.0 到 100.0
+                # 自组网参数
+                ("speed_ad_hoc", 0.0, 100.0),
+                ("distance_ad_hoc", 0.0, 1000.0),
+                ("sinr_ad_hoc", 0.0, 100.0),
+                ("bandwidth_ad_hoc", 1e6, 100e6),
+                ("bitrate_ad_hoc", 0.0, 1e9),
+                # 5G 参数
+                ("snr_5g", 0.0, 100.0),
+                ("speed_5g", 0.0, 100.0),
+                ("distance_5g", 0.0, 1000.0),
+                ("bandwidth_5g", 1e6, 100e6),
+                ("bitrate_5g", 0.0, 1e9),
                 ("current_network", 0, 1)  # 当前网络：0 - 自组网，1 - 5G
             ]
         self.state_params = [param[0] for param in state_params_config]
@@ -51,6 +92,35 @@ class NetworkSwitchEnv(gym.Env):
         self.norm_snr_threshold_15 = (15 - snr_min) / (snr_max - snr_min)
         self.success_threshold = 0
         self.consecutive_low_sinr = 0
+
+    def calculate_bitrate(self, snr, distance, bandwidth, frequency, transmit_power=20, noise_power=-95,
+                          efficiency=0.8):
+        """
+        计算可用比特率（ABR）
+        :param snr: 信噪比（SNR）
+        :param distance: 节点间距离，单位：km
+        :param bandwidth: 信道带宽，单位：Hz
+        :param frequency: 信号频率，单位：MHz
+        :param transmit_power: 发射功率，单位：dBm
+        :param noise_power: 噪声功率，单位：dBm
+        :param efficiency: 效率因子，通常小于 1
+        :return: 可用比特率，单位：bps
+        """
+
+        def calculate_path_loss(distance, frequency):
+            """
+            计算自由空间路径损耗
+            :param distance: 节点间距离，单位：km
+            :param frequency: 信号频率，单位：MHz
+            :return: 路径损耗，单位：dB
+            """
+            return 20 * np.log10(distance) + 20 * np.log10(frequency) + 32.45
+
+        path_loss = calculate_path_loss(distance, frequency)
+        receive_power = transmit_power - path_loss
+        snr_linear = 10 ** (snr / 10)
+        abr = efficiency * bandwidth * np.log2(1 + snr_linear)
+        return abr
 
     def normalize_state(self, state):
             """
