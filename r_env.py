@@ -4,94 +4,62 @@ from gymnasium import spaces
 import time
 
 class NetworkSwitchEnv(gym.Env):
-
-    def calculate_path_loss(distance, frequency):
-        """
-        计算自由空间路径损耗
-        :param distance: 距离，单位：km
-        :param frequency: 信号频率，单位：MHz
-        :return: 路径损耗，单位：dB
-        """
-        return 20 * np.log10(self.distance) + 20 * np.log10(frequency) + 32.45
-
-
-
-    def calculate_abr(sinr, bandwidth, efficiency=0.8):
-        """
-        计算可用比特率（ABR）
-        :param sinr: 信号与干扰加噪声比（SINR）
-        :param bandwidth: 信道带宽，单位：Hz
-        :param efficiency: 效率因子，通常小于 1
-        :return: 可用比特率，单位：bps
-        """
-        return efficiency * bandwidth * np.log2(1 + sinr)
-
-    def calculate_abr(snr, bandwidth, efficiency=0.8):
-        """
-        计算可用比特率（ABR）
-        :param snr: 信噪比（SNR）
-        :param bandwidth: 信道带宽，单位：Hz
-        :param efficiency: 效率因子，通常小于 1
-        :return: 可用比特率，单位：bps
-        """
-        return efficiency * bandwidth * np.log2(1 + snr)
-
     def __init__(self, state_params_config=None):
-        """
-        初始化网络切换环境。
+            """
+            初始化网络切换环境。
 
-        定义动作空间和观测空间，并初始化状态变量。
+            定义动作空间和观测空间，并初始化状态变量。
 
-        参数:
-        state_params_config (list, optional): 状态参数的配置列表，每个元素是一个元组 (param_name, low, high)，
-            表示参数名、参数的最小值和最大值。默认配置为信噪比、速度、距离、信干噪比和当前网络。
-        """
-        # 动作空间：0 - 自组网，1 - 5G，2 - 保持不变
-        self.action_space = spaces.Discrete(3)
+            参数:
+            state_params_config (list, optional): 状态参数的配置列表，每个元素是一个元组 (param_name, low, high)，
+                表示参数名、参数的最小值和最大值。默认配置为信噪比、速度、距离、信干噪比和当前网络。
+            """
+            # 动作空间：0 - 自组网，1 - 5G，2 - 保持不变
+            self.action_space = spaces.Discrete(3)
 
-        # 处理状态空间配置
-        if state_params_config is None:
-            # 定义默认的状态参数配置，区分自组网和 5G
-            state_params_config = [
-                # 自组网参数
-                ("speed_ad_hoc", 0.0, 100.0),
-                ("distance_ad_hoc", 0.0, 1000.0),
-                ("sinr_ad_hoc", 0.0, 100.0),
-                ("bandwidth_ad_hoc", 1e6, 100e6),
-                ("bitrate_ad_hoc", 0.0, 1e9),
-                # 5G 参数
-                ("snr_5g", 0.0, 100.0),
-                ("speed_5g", 0.0, 100.0),
-                ("distance_5g", 0.0, 1000.0),
-                ("bandwidth_5g", 1e6, 100e6),
-                ("bitrate_5g", 0.0, 1e9),
-                ("current_network", 0, 1)  # 当前网络：0 - 自组网，1 - 5G
-            ]
-        self.state_params = [param[0] for param in state_params_config]
-        self.state_lows = np.array([param[1] for param in state_params_config], dtype=np.float32)
-        self.state_highs = np.array([param[2] for param in state_params_config], dtype=np.float32)
+            if state_params_config is None:
+                state_params_config = [
+                    # 自组网参数
+                    ("rss_ad_hoc", -120.0, -10.0),  # 调整取值范围
+                    ("rtt_ad_hoc", 0.0, 100.0),
+                    ("bitrate_ad_hoc", 0.0, 1e9),
+                    ("c_ad_hoc", 0, 1),
+                    # 5G 参数
+                    ("rtt_5g", 0.0, 100.0),
+                    ("rss_5g", -120.0, -10.0),  # 调整取值范围
+                    ("bitrate_5g", 0.0, 1e9),
+                    ("c_5g", 0, 1),
+                    ("current_network", 0, 1)
+                ]
+            self.state_params = [param[0] for param in state_params_config]
+            self.state_lows = np.array([param[1] for param in state_params_config], dtype=np.float32)
+            self.state_highs = np.array([param[2] for param in state_params_config], dtype=np.float32)
 
-        # 状态空间定义
-        self.observation_space = spaces.Box(
-            low=self.state_lows,
-            high=self.state_highs,
-            dtype=np.float32
-        )
+            # 状态空间定义
+            self.observation_space = spaces.Box(
+                low=self.state_lows,
+                high=self.state_highs,
+                dtype=np.float32
+            )
 
-        # 初始化状态变量
-        self.state = {}
-        # 计算归一化参数
-        self.state_mins = self.state_lows
-        self.state_maxs = self.state_highs
-        self.reset()
+            # 初始化状态变量
+            self.state = {}
 
-        sinr_min, sinr_max = self.state_mins[self.state_params.index("sinr")], self.state_maxs[self.state_params.index("sinr")]
-        snr_min, snr_max = self.state_mins[self.state_params.index("snr")], self.state_maxs[self.state_params.index("snr")]
-        self.norm_sinr_threshold_1 = (1 - sinr_min) / (sinr_max - sinr_min)
-        self.norm_sinr_threshold_20 = (20 - sinr_min) / (sinr_max - sinr_min)
-        self.norm_snr_threshold_15 = (15 - snr_min) / (snr_max - snr_min)
-        self.success_threshold = 0
-        self.consecutive_low_sinr = 0
+            # 计算归一化参数
+            self.state_mins = self.state_lows
+            self.state_maxs = self.state_highs
+            self.reset()
+
+            sinr_min, sinr_max = self.state_mins[self.state_params.index("sinr")], self.state_maxs[self.state_params.index("sinr")]
+            snr_min, snr_max = self.state_mins[self.state_params.index("snr")], self.state_maxs[self.state_params.index("snr")]
+            self.norm_sinr_threshold_1 = (1 - sinr_min) / (sinr_max - sinr_min)
+            self.norm_sinr_threshold_20 = (20 - sinr_min) / (sinr_max - sinr_min)
+            self.norm_snr_threshold_15 = (15 - snr_min) / (snr_max - snr_min)
+            self.success_threshold = 0
+            self.consecutive_low_sinr = 0
+
+
+
 
     def calculate_bitrate(self, snr, distance, bandwidth, frequency, transmit_power=20, noise_power=-95,
                           efficiency=0.8):
@@ -106,18 +74,18 @@ class NetworkSwitchEnv(gym.Env):
         :param efficiency: 效率因子，通常小于 1
         :return: 可用比特率，单位：bps
         """
-
+        """
         def calculate_path_loss(distance, frequency):
-            """
+           
             计算自由空间路径损耗
             :param distance: 节点间距离，单位：km
             :param frequency: 信号频率，单位：MHz
             :return: 路径损耗，单位：dB
-            """
+            
             return 20 * np.log10(distance) + 20 * np.log10(frequency) + 32.45
-
-        path_loss = calculate_path_loss(distance, frequency)
-        receive_power = transmit_power - path_loss
+        """
+       #path_loss = calculate_path_loss(distance, frequency)
+        #receive_power = transmit_power - path_loss
         snr_linear = 10 ** (snr / 10)
         abr = efficiency * bandwidth * np.log2(1 + snr_linear)
         return abr
@@ -160,28 +128,214 @@ class NetworkSwitchEnv(gym.Env):
             - info (dict): 包含额外信息的字典，如状态参数的变化、当前状态值。
     """
 
+    def calculate_UB(self,eta1, b, b_min=2,b0=0.075,B0=0.49,theta=97.8):
+        """
+        根据公式计算 U_B(b)
+
+        参数:
+        eta1 (float): 公式中的参数 η₁
+        Dist_b (float): Dist(b) 的值
+        b (float): 输入变量 b
+        b_min (float): 阈值 b_min
+
+        返回:
+        float: U_B(b) 的计算结果
+        """
+        # 单位阶跃函数判断
+        if b >= b_min:
+            step = 1
+        else:
+            step = 0
+
+        # 计算对数部分
+        denominator = b - b0
+        if denominator == 0:
+            raise ValueError("分母不能为零，rj - r0 不能等于 0")
+        dist_b=theta/denominator+B0
+        log_part = math.log10((255 ** 2) / dist_b)
+
+        # 计算最终结果
+        UB = eta1 * 10 * log_part * step
+        return UB
+
+    def calculate_UD(self,eta2, d, d_min=150):
+        """
+        根据公式 U_D(d) = η₂·u(d_min - d) 计算结果，其中 u 为单位阶跃函数
+
+        :param eta2: 公式中的参数 η₂（浮点数）
+        :param d: 输入变量 d（浮点数）
+        :param d_min: 阈值 d_min（浮点数）
+        :return: U_D(d) 的计算结果
+        """
+        # 实现单位阶跃函数逻辑
+        if d_min - d >= 0:
+            unit_step = 1
+        else:
+            unit_step = 0
+
+        UD=eta2 * unit_step
+        return UD
+
+    def calculate_URSS(self,eta3, rss, rssmin=-70):
+        """
+        根据公式 U_RSS(rss) = η₃·rss·u(rss - rss_min) 计算结果
+        考虑到rss多半为负值，应该将实际的
+        :param eta3: 公式中的参数 η₃（浮点数）
+        :param rss: 接收信号强度 rss（浮点数）
+        :param rssmin: 阈值 rss_min（浮点数）
+        :return: U_RSS(rss) 的计算结果
+        """
+        # 处理单位阶跃函数
+        if rss >= rssmin:
+            unit_step = 1
+        else:
+            unit_step = 0
+
+        URSS=-eta3 * rss * unit_step
+        return URSS
+
+    def calculate_UC(self,network_type,c0,c1):
+        """
+        根据公式 \( U_C(c) =
+        \begin{cases}
+        1 & \text{if WiFi network} \\
+        0.1 & \text{otherwise}
+        \end{cases} \) 计算结果。
+
+        :param network_type: 网络类型
+        :return: \(U_C(c)\) 的计算结果
+        """
+        if network_type== 0:
+            UC=1.0
+        elif network_type== 1:
+            UC=c1/c0
+        return  UC
+    def normalize_utilities(self, utilities):
+        """
+        对效用值进行归一化处理
+        :param utilities: 包含 UC, URSS, UD, UB 的列表
+        :return: 归一化后的效用值列表
+        """
+        min_val = min(utilities)
+        max_val = max(utilities)
+        if max_val - min_val == 0:
+            return [0] * len(utilities)
+        return [(u - min_val) / (max_val - min_val) for u in utilities]
+
+    def calculate_G(self, omega_b, omega_d, omega_Rs, omega_c, Ub, Ud, U_Rs, Uc):
+        """
+        计算 G(x, a_t) 函数
+        :param omega_b: 比特率效用权重
+        :param omega_d: 时延效用权重
+        :param omega_Rs: 信号强度效用权重
+        :param omega_c: 成本效用权重
+        :param Ub: 比特率效用值
+        :param Ud: 时延效用值
+        :param U_Rs: 信号强度效用值
+        :param Uc: 成本效用值
+        :return: G(x, a_t) 的计算结果
+        """
+        utilities = [Ub, Ud, U_Rs, Uc]
+        normalized_utilities = self.normalize_utilities(utilities)
+        Ub_norm, Ud_norm, U_Rs_norm, Uc_norm = normalized_utilities
+        return omega_b * Ub_norm + omega_d * Ud_norm + omega_Rs * U_Rs_norm + omega_c * Uc_norm
+
+
+    def calculate_Q(self, alpha, G_value, a_t):
+        """
+        计算 Q(x, a_t) 函数
+        :param alpha: 权重参数 (0.5, 1]
+        :param G_value: G(x, a_t) 的计算结果
+        :param a_t: 当前动作
+        :param a_prev: 上一时刻动作
+        :return: Q(x, a_t) 的计算结果
+        """
+        indicator_diff = 0 if a_t == 2 else 1
+        indicator_same = 1 if a_t == 2 else 0
+
+        return (1 - alpha) * G_value * indicator_diff + alpha * G_value * indicator_same
+
+    def calculate_reward(self, state, action):
+        # 从状态中提取所需参数
+        if state["current_network"] == 0:
+            rss = state["rss_ad_hoc"]
+            rtt= state["rtt_ad_hoc"]
+            bitrate = state["bitrate_ad_hoc"]
+            c0 = state["c_ad_hoc"]
+        else:
+            rss = state["rss_5g"]
+            rtt= state["rtt_5g"]
+            bitrate = state["bitrate_5g"]
+            c1 = state["c_5g"]
+
+        # 计算各个效用值
+        eta1 = 0.5
+        eta2 = 0.6
+        eta3 = 0.7
+        Ub = self.calculate_UB(eta1, bitrate)
+        Ud = self.calculate_UD(eta2, rtt)  # 假设时延为20，需要根据实际情况修改
+        U_Rs = self.calculate_URSS(eta3, rss)
+        Uc = self.calculate_UC(state["current_network"],c0,c1)
+
+        # 计算 G 函数
+        omega_b = 0.25
+        omega_d = 0.25
+        omega_Rs = 0.25
+        omega_c = 0.25
+        G_value = self.calculate_G(omega_b, omega_d, omega_Rs, omega_c, Ub, Ud, U_Rs, Uc)
+
+        # 计算 Q 函数
+        alpha = 0.8
+        Q_value = self.calculate_Q(alpha, G_value, action)
+
+        return Q_value
+
+
     def step(self, action, external_params=None):
         old_state = self.state.copy()
-
-        # 处理外部参数
-        if external_params is None:
-            external_params = {
-                "snr": 14,
-                "speed": 0,
-                "distance": 0,
-                "sinr": 0
-            }
-
         # 更新状态
-        for param, value in external_params.items():
-            if param in self.state_params:
-                self.state[param] = np.clip(value, self.state_lows[self.state_params.index(param)],
-                                            self.state_highs[self.state_params.index(param)])
-            # 对状态进行归一化
+        if external_params is not None:
+            for param, value in external_params.items():
+                if param in self.state_params:
+                    self.state[param] = np.clip(value, self.state_lows[self.state_params.index(param)],
+                                                self.state_highs[self.state_params.index(param)])
 
-        self.state = self.normalize_state(self.state)
-
+            # 检查是否有计算比特率所需的参数
+            if (
+                    'snr_5g' in external_params and 'distance' in external_params and 'bandwidth_5g' in external_params and 'frequency' in external_params) or \
+                    (
+                            'sinr_ad_hoc' in external_params and 'distance' in external_params and 'bandwidth_ad_hoc' in external_params and 'frequency' in external_params):
+                current_network = self.state["current_network"]
+                if current_network == 0:  # 自组网
+                    sinr = external_params['sinr_ad_hoc']
+                    distance = external_params['distance']
+                    bandwidth = external_params['bandwidth_ad_hoc']
+                    frequency = external_params['frequency']
+                    bitrate = self.calculate_bitrate(snr=sinr, distance=distance, bandwidth=bandwidth,
+                                                     frequency=frequency)
+                    self.state["bitrate_ad_hoc"] = bitrate
+                elif current_network == 1:  # 5G
+                    snr = external_params['snr_5g']
+                    distance = external_params['distance']
+                    bandwidth = external_params['bandwidth_5g']
+                    frequency = external_params['frequency']
+                    bitrate = self.calculate_bitrate(snr=snr, distance=distance, bandwidth=bandwidth,
+                                                     frequency=frequency)
+                    self.state["bitrate_5g"] = bitrate
+                    # 更新 rss 和 rtt
+                current_network = self.state["current_network"]
+                if current_network == 0:  # 自组网
+                    if 'rss_ad_hoc' in external_params:
+                            self.state["rss_ad_hoc"] = external_params['rss_ad_hoc']
+                    if 'rtt_ad_hoc' in external_params:
+                            self.state["rtt_ad_hoc"] = external_params['rtt_ad_hoc']
+                elif current_network == 1:  # 5G
+                    if 'rss_5g' in external_params:
+                            self.state["rss_5g"] = external_params['rss_5g']
+                    if 'rtt_5g' in external_params:
+                            self.state["rtt_5g"] = external_params['rtt_5g']
         # 执行动作
+        prev_action = self.state["current_network"]
         if action == 0:
             self.state["current_network"] = 0
         elif action == 1:
@@ -189,78 +343,8 @@ class NetworkSwitchEnv(gym.Env):
         elif action == 2:
             pass  # 保持不变
 
-        # 计算奖励（优化逻辑）
-        reward = 5
-        current_network = self.state["current_network"]
-        sinr = self.state["sinr"]
-        snr = self.state["snr"]
-
-        # 网络切换奖励
-        # 定义一个常量来表示切换的惩罚，可根据实际情况调整
-        SWITCH_PENALTY = 0
-
-        if current_network == 1 and sinr <= self.norm_sinr_threshold_1:
-            if action == 0:
-                # 当 5G 信号差时切换到自组网，给予奖励，但减去切换惩罚
-                reward += 10 - SWITCH_PENALTY
-            else:
-                # 未切换到自组网给予负向奖励
-                reward -= 5
-        elif current_network == 0:
-            # 自组网奖励：基于 SNR 稳定性
-            # 基准奖励
-            reward += (snr - self.norm_snr_threshold_15) * 0.5
-            # 变化奖励
-            old_snr = old_state.get("snr", 0)
-            reward += (snr - old_snr) * 0.5
-
-            # 检查是否从 5G 切换到自组网
-            if old_state.get("current_network", 0) == 1 and action == 0:
-                # 如果是从 5G 切换到自组网，减去切换惩罚
-                reward -= SWITCH_PENALTY
-
-            # 对比自组网和 5G 的信号质量
-            old_sinr = old_state.get("sinr", 0)
-            if old_sinr > self.norm_sinr_threshold_1 and snr < old_sinr:
-                # 如果自组网信号质量比之前的 5G 略差，给予一定的负向奖励
-                reward -= 1
-
-        elif current_network == 1 and sinr > self.norm_sinr_threshold_1:
-            # 5G 奖励：基于 SINR 稳定性
-            # 基准奖励
-            reward += (sinr - self.norm_sinr_threshold_20) * 0.5
-            # 变化奖励
-            old_sinr = old_state.get("sinr", 0)
-            reward += (sinr - old_sinr) * 0.5
-
-            # 检查是否从自组网切换到 5G
-            if old_state.get("current_network", 0) == 0 and action == 1:
-                # 如果是从自组网切换到 5G，减去切换惩罚
-                reward -= SWITCH_PENALTY
-
-        # 惩罚频繁切换
-        if action != 2:
-            reward -= 2  # 每次切换扣 2 分
-
-        # 终止条件判断
-        terminated = False
-        truncated = False
-
-        # 失败条件：连续 3 步 5G SINR ≤ 1 且未切换到自组网
-        if self.state["current_network"] == 1 and self.state["sinr"] <= self.norm_sinr_threshold_1 and action != 0:
-            self.consecutive_low_sinr += 1
-            if self.consecutive_low_sinr >= 3:
-                terminated = True
-                reward -= 50  # 失败惩罚
-        else:
-            self.consecutive_low_sinr = 0  # 重置计数器
-
-        # 成功条件：单步奖励 ≥5
-        if reward >= self.success_threshold:
-            truncated = True
-            reward += 50  # 成功奖励
-
-
+        # 计算奖励
+        reward = self.calculate_reward(self.state, action, prev_action)
         print(f"reward ：{reward} ")
 
         observation = np.array([self.state[param] for param in self.state_params], dtype=np.float32)
@@ -269,6 +353,8 @@ class NetworkSwitchEnv(gym.Env):
         }
         info.update(self.state)
 
+        terminated = False
+        truncated = False
         return (
             observation,
             float(reward),
@@ -281,15 +367,12 @@ class NetworkSwitchEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
 
-        for i, param in enumerate(self.state_params):
-            if param == "current_network":
-                self.state[param] = np.random.randint(0, 2)
-            elif param == "snr":
-                self.state[param] = 14
-            elif param == "sinr":
-                self.state[param] = 15
+        for param_name, low, high in self.state_params_config:
+            # 随机初始化状态变量
+            if param_name == "current_network":
+                self.state[param_name] = np.random.randint(low, high + 1)
             else:
-                self.state[param] = np.random.uniform(self.state_lows[i], self.state_highs[i])
+                self.state[param_name] = np.random.uniform(low, high)
 
         observation = np.array([self.state[param] for param in self.state_params], dtype=np.float32)
         # 对状态进行归一化
